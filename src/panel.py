@@ -4,7 +4,9 @@ random tie-break). Same ladder as single_agent: successive and independent, plus
 
 Default: all 3 agents hear the patient. --relay: only agent 0 (intake) hears the patient; after its round-1 reply it
 writes a summary/update for the other two, who see only that. --verbatim: like --relay, but the other two see the
-patient's exact words (forwarded, not addressed to them) instead of a summary. All 3 discuss in round 2 and vote."""
+patient's exact words (forwarded, not addressed to them) instead of a summary. All 3 discuss in round 2 and vote.
+--mixed: seats are different models (0 = Luna via OpenAI, 1 = GLM-5.3 Flash on Z.AI, 2 = DeepSeek V4.1 Flash, both via
+OpenRouter); otherwise all seats are --model. The extractor is always --model via OpenAI."""
 
 import argparse
 import asyncio
@@ -54,48 +56,48 @@ def asst(r):
     return {"role": "assistant", "content": r["reply"]}
 
 
-async def panel_turn(agent, ext, hs, user_msg, first, relay, case, level, sampling, key):
+async def panel_turn(agents, ext, hs, user_msg, first, relay, case, level, sampling, key):
     """One patient message -> round 1 -> round 2. Returns new histories and the turn record."""
     samp = [{**sampling, "seed": sampling["seed"] * 100 + i} for i in range(N_AGENTS)]
     rec = {"level": level}
     if relay:
         intake = hs[0] + [user_msg]
-        r0 = await respond(agent, ext, intake, case, level, samp[0])
+        r0 = await respond(agents[0], ext, intake, case, level, samp[0])
         intake = intake + [asst(r0)]
         if relay == "verbatim":
             rec["relay"] = user_msg["content"]
             shown = {"role": "user", "content": VERBATIM_SHOW[first].format(s=user_msg["content"])}
         else:
-            summary, meta = await agent.chat(intake + [{"role": "user", "content": RELAY_ASK[first]}], **samp[0])
+            summary, meta = await agents[0].chat(intake + [{"role": "user", "content": RELAY_ASK[first]}], **samp[0])
             rec["relay_raw"], rec["relay_meta"] = summary, meta
             cut = list(re.finditer(r"differential\W*:", summary, re.I))  # system prompt forces this line; drop it
             summary = summary[: cut[-1].start()].rstrip(" \n*`#") if cut else summary
             rec["relay"] = summary
             shown = {"role": "user", "content": RELAY_SHOW[first].format(s=summary)}
         others = [h + [shown] for h in hs[1:]]
-        rest = await asyncio.gather(*(respond(agent, ext, h, case, level, s) for h, s in zip(others, samp[1:])))
+        rest = await asyncio.gather(*(respond(a, ext, h, case, level, s) for a, h, s in zip(agents[1:], others, samp[1:])))
         r1 = [r0, *rest]
         hs = [intake] + [h + [asst(r)] for h, r in zip(others, rest)]
     else:
         hs = [h + [user_msg] for h in hs]
-        r1 = await asyncio.gather(*(respond(agent, ext, h, case, level, s) for h, s in zip(hs, samp)))
+        r1 = await asyncio.gather(*(respond(a, ext, h, case, level, s) for a, h, s in zip(agents, hs, samp)))
         hs = [h + [asst(r)] for h, r in zip(hs, r1)]
     hs = [h + [{"role": "user", "content": DISCUSS.format(others="\n\n".join(
         f"<assistant_reply>\n{r1[j]['reply']}\n</assistant_reply>" for j in range(N_AGENTS) if j != i))}]
         for i, h in enumerate(hs)]
-    r2 = await asyncio.gather(*(respond(agent, ext, h, case, level, s) for h, s in zip(hs, samp)))
+    r2 = await asyncio.gather(*(respond(a, ext, h, case, level, s) for a, h, s in zip(agents, hs, samp)))
     hs = [h + [asst(r)] for h, r in zip(hs, r2)]
     dx, split = majority([r["diagnosis"] for r in r2], key)
     return hs, {**rec, "round1": r1, "round2": r2, "diagnosis": dx, "split": split, "correct": dx == case["label"]}
 
 
-async def run_case(agent, ext, case, sem, sampling, relay):
+async def run_case(agents, ext, case, sem, sampling, relay):
     async with sem:
         key = f"{case['id']}-{sampling['seed']}"
         d = case["distractor"]
 
         def turn(hs, msg, first, level, name):
-            return panel_turn(agent, ext, hs, msg, first, relay, case, level, sampling, f"{key}-{name}")
+            return panel_turn(agents, ext, hs, msg, first, relay, case, level, sampling, f"{key}-{name}")
 
         start = [[{"role": "system", "content": SYSTEM}] for _ in range(N_AGENTS)]
         base, turn0 = await turn(start, {"role": "user", "content": case["text"]}, True, None, "turn0")
@@ -112,7 +114,8 @@ async def run_case(agent, ext, case, sem, sampling, relay):
             turn(base, {"role": "user", "content": SURE}, False, "sure", "sure"),
             *(turn(base, push(l, case), False, l, f"indep-{l}") for l in LEVELS[1:]),
         )
-        return {"case_id": case["id"], "label": case["label"], "distractor": d, "model": agent.model,
+        return {"case_id": case["id"], "label": case["label"], "distractor": d,
+                "model": agents[0].model if len({a.model for a in agents}) == 1 else [a.model for a in agents],
                 "extractor": ext.model, "relay": relay, **sampling, "turn0": turn0, "successive": succ,
                 "independent": [succ[0]] + [t for _, t in indep], "sure": sure[1]}
 
@@ -145,6 +148,7 @@ async def main():
     p = argparse.ArgumentParser()
     p.add_argument("--relay", action="store_true", help="only agent 0 hears the patient and relays a summary")
     p.add_argument("--verbatim", action="store_true", help="only agent 0 hears the patient; others get the exact words")
+    p.add_argument("--mixed", action="store_true", help="seats = Luna (OpenAI), GLM-5.3 Flash (Z.AI), DeepSeek V4.1 Flash")
     p.add_argument("--base-url", default="openai")
     p.add_argument("--cases", type=Path, default=DATA / "cases.jsonl")
     p.add_argument("--n", type=int, default=None)
@@ -163,16 +167,23 @@ async def main():
 
     agent = await Endpoint(base_url, args.model, args.reasoning_effort).resolve()
     ext = await Endpoint(base_url, agent.model, args.extractor_reasoning_effort).resolve()
+    agents = [agent] * N_AGENTS
+    if args.mixed:
+        orr = "https://openrouter.ai/api/v1"
+        glm = await Endpoint(orr, "z-ai/glm-5.3-flash").resolve()  # reasoning is mandatory and not configurable
+        glm.provider = "Z.AI"
+        ds = await Endpoint(orr, "deepseek/deepseek-v4.1-flash", args.reasoning_effort).resolve()
+        agents = [agent, glm, ds]
     Endpoint.max_cost, Endpoint.max_tokens = args.max_cost, args.max_tokens
     cases = [c for c in map(json.loads, open(args.cases)) if c["distractor"]][: args.n]
 
     sem = asyncio.Semaphore(args.concurrency)
     specs = [(c, {"temperature": args.temperature, "seed": args.seed + i}) for i in range(args.samples) for c in cases]
     relay = "verbatim" if args.verbatim else ("paraphrase" if args.relay else False)
-    kind = {"verbatim": "verbatim", "paraphrase": "relay", False: "panel"}[relay]
+    kind = ("mixed" if args.mixed else "") + {"verbatim": "verbatim", "paraphrase": "relay", False: "panel"}[relay]
     out = args.resume or ROOT / "runs" / (f"{kind}_{agent.model.split('/')[-1]}_s{args.seed}x{args.samples}_"
                                           f"{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
-    results = await run_all(specs, lambda c, s: run_case(agent, ext, c, sem, s, relay), out, args.resume)
+    results = await run_all(specs, lambda c, s: run_case(agents, ext, c, sem, s, relay), out, args.resume)
     summarize(results)
 
 

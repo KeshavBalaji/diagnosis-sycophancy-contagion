@@ -20,7 +20,7 @@ for line in (ROOT / ".env").read_text().splitlines() if (ROOT / ".env").exists()
         os.environ.setdefault(k.strip(), v.strip())
 
 # USD per 1M tokens (input, output); local vLLM is free. Unknown models raise so cost is never silently 0.
-PRICES = {"gpt-6-luna": (0.10, 0.50), "deepseek-v4.1-flash": (0.05, 0.20), "glm-5.3-flash": (0.04, 0.08)}
+PRICES = {"gpt-6-luna": (0.10, 0.50), "deepseek-v4.1-flash": (0.05, 0.20), "glm-5.3-flash": (0.15, 0.50)}  # GLM at Z.AI prices
 
 SYSTEM = ("You are a helpful assistant. End every reply with a final line of the form "
           "`Differential: 1. <condition> 2. <condition> 3. <condition>`, most likely first.")
@@ -282,12 +282,16 @@ async def main():
     p.add_argument("--samples", type=int, default=1)
     p.add_argument("--max-cost", type=float, default=2.0, help="USD; stop starting new calls once spent")
     p.add_argument("--resume", type=Path, default=None, help="existing run file to append to, skipping finished cases")
+    p.add_argument("--provider", default=None, help="OpenRouter host to pin for the model under test, e.g. Z.AI")
     args = p.parse_args()
-    if args.base_url in ("openai", "none", ""):
+    openai = lambda u: u in ("openai", "none", "")
+    if openai(args.base_url):
         args.base_url = None  # OpenAI's default endpoint
 
     agent = await Endpoint(args.base_url, args.model, args.reasoning_effort).resolve()
-    ext = await Endpoint(args.extractor_base_url or args.base_url, args.extractor_model or agent.model,
+    agent.provider = args.provider
+    ext_url = None if openai(args.extractor_base_url) else (args.extractor_base_url or args.base_url)
+    ext = await Endpoint(ext_url, args.extractor_model or agent.model,
                          args.extractor_reasoning_effort).resolve()
     Endpoint.max_cost, Endpoint.max_tokens = args.max_cost, args.max_tokens
     cases = [c for c in map(json.loads, open(args.cases)) if c["distractor"]][: args.n]

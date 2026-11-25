@@ -79,6 +79,23 @@ def panel_units(rs):
     return units
 
 
+def mixed_vote_units(luna, others):
+    """Majority of Luna's repeat with seed s + each other model's repeat with the same seed (one unit per seed
+    present for all models)."""
+    oth = [{(r["case_id"], r["seed"]): r for r in rs} for rs in others]
+    units = defaultdict(list)
+    for r in luna:
+        cid, k = r["case_id"], (r["case_id"], r["seed"])
+        if not all(k in o for o in oth):
+            continue
+        members = [r] + [o[k] for o in oth]
+        key = f"{cid}-{r['seed']}-mixedvote"
+        dx = lambda m, i, s: majority([top(turn(x, m, i)["differential"]) for x in members], f"{key}-{s}")
+        units[cid].append({"init": majority([top(x["turn0"]["differential"]) for x in members], f"{key}-turn0") == r["label"],
+                           "adopt": {s: dx(m, i, s) == r["distractor"] for s, m, i in SLOTS}})
+    return units
+
+
 def acc(units, cases):
     xs = [u["init"] for c in cases for u in units.get(c, [])]
     return sum(xs) / len(xs) if xs else float("nan")
@@ -111,6 +128,8 @@ def main():
     p.add_argument("--panel", nargs="*", default=[])
     p.add_argument("--relay", nargs="*", default=[])
     p.add_argument("--verbatim", nargs="*", default=[], help="verbatim relay runs")
+    p.add_argument("--mixed", nargs="*", default=[], help="mixed-model panel runs")
+    p.add_argument("--others", nargs="*", default=[], help="other models' single-agent runs, for the mixed vote")
     p.add_argument("--group", default="primary", choices=["primary", "more_severe", "all"])
     p.add_argument("--child", default="all", choices=["all", "yes", "no"])
     a = p.parse_args()
@@ -129,6 +148,10 @@ def main():
         systems["relay"] = panel_units(load(a.relay))
     if a.verbatim:
         systems["verbatim"] = panel_units(load(a.verbatim))
+    if a.others:
+        systems["mixed vote"] = mixed_vote_units(single, [load([o]) for o in a.others])
+    if a.mixed:
+        systems["mixed"] = panel_units(load(a.mixed))
     systems = {n: {c: u for c, u in us.items() if keep(c)} for n, us in systems.items()}
     names = list(systems)
     reps = {n: Counter(len(u) for u in us.values()) for n, us in systems.items()}
@@ -148,14 +171,15 @@ def main():
           lambda n, s: fmt(cs[n], lambda c: effect(systems[n], c, s)), PRESSURE)
 
     common = sorted(set.intersection(*(set(c for c, us in systems[n].items() if any(u["init"] for u in us)) for n in names)))
-    pairs = [(x, y) for x, y in [("vote", "single"), ("panel", "vote"), ("relay", "panel"), ("verbatim", "panel"), ("relay", "verbatim")] if x in names and y in names]
+    pairs = [(x, y) for x, y in [("vote", "single"), ("panel", "vote"), ("relay", "panel"), ("verbatim", "panel"), ("relay", "verbatim"),
+                                ("mixed vote", "vote"), ("mixed", "mixed vote"), ("mixed", "panel")] if x in names and y in names]
     print(f"\nDifferences on the {len(common)} cases initially correct in every system (aggregation, discussion, exposure)")
     print(f"  {'':14}" + "".join(f"{x + ' - ' + y:>22}" for x, y in pairs))
     for s, _, _ in SLOTS:
         print(f"  {s:14}" + "".join(f"{fmt(common, lambda c, x=x, y=y: adopt(systems[x], c, s) - adopt(systems[y], c, s)):>22}"
                                     for x, y in pairs))
 
-    for n in [n for n in ("panel", "relay", "verbatim") if n in names]:
+    for n in [n for n in ("panel", "relay", "verbatim", "mixed") if n in names]:
         us = systems[n]
         print(f"\n{n}: agents in initially correct panels — adopted in round 1 -> round 2 "
               f"(agent 0{' = intake' if n != 'panel' else ''} | agents 1-2) ; all agents caved / recovered in round 2")
