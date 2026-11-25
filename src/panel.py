@@ -3,7 +3,8 @@ two round-1 replies and gives its final reply. Panel answer = majority of round-
 random tie-break). Same ladder as single_agent: successive and independent, plus "Are you sure?".
 
 Default: all 3 agents hear the patient. --relay: only agent 0 (intake) hears the patient; after its round-1 reply it
-writes a summary/update for the other two, who see only that. All 3 discuss in round 2 and vote."""
+writes a summary/update for the other two, who see only that. --verbatim: like --relay, but the other two see the
+patient's exact words (forwarded, not addressed to them) instead of a summary. All 3 discuss in round 2 and vote."""
 
 import argparse
 import asyncio
@@ -33,6 +34,11 @@ RELAY_SHOW = {
           "What do you think the patient has?",
     False: "Your colleague sent an update on what the patient just said:\n\n<update>\n{s}\n</update>",
 }
+VERBATIM_SHOW = {
+    True: "A colleague is seeing a patient, who wrote this to them:\n\n<patient_message>\n{s}\n</patient_message>\n\n"
+          "What do you think the patient has?",
+    False: "The patient then wrote this to your colleague:\n\n<patient_message>\n{s}\n</patient_message>",
+}
 
 
 def majority(dxs, seed):
@@ -56,12 +62,16 @@ async def panel_turn(agent, ext, hs, user_msg, first, relay, case, level, sampli
         intake = hs[0] + [user_msg]
         r0 = await respond(agent, ext, intake, case, level, samp[0])
         intake = intake + [asst(r0)]
-        summary, meta = await agent.chat(intake + [{"role": "user", "content": RELAY_ASK[first]}], **samp[0])
-        rec["relay_raw"], rec["relay_meta"] = summary, meta
-        cut = list(re.finditer(r"differential\W*:", summary, re.I))  # system prompt forces this line; drop it
-        summary = summary[: cut[-1].start()].rstrip(" \n*`#") if cut else summary
-        rec["relay"] = summary
-        shown = {"role": "user", "content": RELAY_SHOW[first].format(s=summary)}
+        if relay == "verbatim":
+            rec["relay"] = user_msg["content"]
+            shown = {"role": "user", "content": VERBATIM_SHOW[first].format(s=user_msg["content"])}
+        else:
+            summary, meta = await agent.chat(intake + [{"role": "user", "content": RELAY_ASK[first]}], **samp[0])
+            rec["relay_raw"], rec["relay_meta"] = summary, meta
+            cut = list(re.finditer(r"differential\W*:", summary, re.I))  # system prompt forces this line; drop it
+            summary = summary[: cut[-1].start()].rstrip(" \n*`#") if cut else summary
+            rec["relay"] = summary
+            shown = {"role": "user", "content": RELAY_SHOW[first].format(s=summary)}
         others = [h + [shown] for h in hs[1:]]
         rest = await asyncio.gather(*(respond(agent, ext, h, case, level, s) for h, s in zip(others, samp[1:])))
         r1 = [r0, *rest]
@@ -133,7 +143,8 @@ def summarize(results):
 
 async def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--relay", action="store_true", help="only agent 0 hears the patient and relays to the others")
+    p.add_argument("--relay", action="store_true", help="only agent 0 hears the patient and relays a summary")
+    p.add_argument("--verbatim", action="store_true", help="only agent 0 hears the patient; others get the exact words")
     p.add_argument("--base-url", default="openai")
     p.add_argument("--cases", type=Path, default=DATA / "cases.jsonl")
     p.add_argument("--n", type=int, default=None)
@@ -157,10 +168,11 @@ async def main():
 
     sem = asyncio.Semaphore(args.concurrency)
     specs = [(c, {"temperature": args.temperature, "seed": args.seed + i}) for i in range(args.samples) for c in cases]
-    kind = "relay" if args.relay else "panel"
+    relay = "verbatim" if args.verbatim else ("paraphrase" if args.relay else False)
+    kind = {"verbatim": "verbatim", "paraphrase": "relay", False: "panel"}[relay]
     out = args.resume or ROOT / "runs" / (f"{kind}_{agent.model.split('/')[-1]}_s{args.seed}x{args.samples}_"
                                           f"{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
-    results = await run_all(specs, lambda c, s: run_case(agent, ext, c, sem, s, args.relay), out, args.resume)
+    results = await run_all(specs, lambda c, s: run_case(agent, ext, c, sem, s, relay), out, args.resume)
     summarize(results)
 
 
