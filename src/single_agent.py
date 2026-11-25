@@ -80,6 +80,8 @@ class Endpoint:
         key = "none" if self.local else os.environ["OPENROUTER_API_KEY" if "openrouter" in (base_url or "") else "OPENAI_API_KEY"]
         self.client = AsyncOpenAI(base_url=base_url, api_key=key)
         self.openai = base_url is None  # OpenAI reasoning models only accept the default temperature
+        self.openrouter = "openrouter" in (base_url or "")
+        self.provider = None  # OpenRouter host to pin, e.g. "Z.AI"
         self.model, self.reasoning_effort = model, reasoning_effort
 
     async def resolve(self):
@@ -106,6 +108,9 @@ class Endpoint:
             kw["reasoning_effort"] = self.reasoning_effort
         if self.local:
             kw["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        elif self.openrouter:  # pin one host if given; otherwise OpenRouter load-balances across hosts
+            kw["extra_body"] = {"provider": {"order": [self.provider], "allow_fallbacks": False} if self.provider
+                                else {"sort": "price"}}
         r = await self.client.chat.completions.create(model=self.model, messages=messages, max_completion_tokens=Endpoint.max_tokens, **kw)
         cost = self.cost(r.usage)
         Endpoint.spent += cost

@@ -110,6 +110,7 @@ def main():
     p.add_argument("--single", nargs="+", required=True)
     p.add_argument("--panel", nargs="*", default=[])
     p.add_argument("--relay", nargs="*", default=[])
+    p.add_argument("--verbatim", nargs="*", default=[], help="verbatim relay runs")
     p.add_argument("--group", default="primary", choices=["primary", "more_severe", "all"])
     p.add_argument("--child", default="all", choices=["all", "yes", "no"])
     a = p.parse_args()
@@ -126,6 +127,8 @@ def main():
         systems["panel"] = panel_units(load(a.panel))
     if a.relay:
         systems["relay"] = panel_units(load(a.relay))
+    if a.verbatim:
+        systems["verbatim"] = panel_units(load(a.verbatim))
     systems = {n: {c: u for c, u in us.items() if keep(c)} for n, us in systems.items()}
     names = list(systems)
     reps = {n: Counter(len(u) for u in us.values()) for n, us in systems.items()}
@@ -145,17 +148,17 @@ def main():
           lambda n, s: fmt(cs[n], lambda c: effect(systems[n], c, s)), PRESSURE)
 
     common = sorted(set.intersection(*(set(c for c, us in systems[n].items() if any(u["init"] for u in us)) for n in names)))
-    pairs = [(x, y) for x, y in [("vote", "single"), ("panel", "vote"), ("relay", "panel")] if x in names and y in names]
+    pairs = [(x, y) for x, y in [("vote", "single"), ("panel", "vote"), ("relay", "panel"), ("verbatim", "panel"), ("relay", "verbatim")] if x in names and y in names]
     print(f"\nDifferences on the {len(common)} cases initially correct in every system (aggregation, discussion, exposure)")
     print(f"  {'':14}" + "".join(f"{x + ' - ' + y:>22}" for x, y in pairs))
     for s, _, _ in SLOTS:
         print(f"  {s:14}" + "".join(f"{fmt(common, lambda c, x=x, y=y: adopt(systems[x], c, s) - adopt(systems[y], c, s)):>22}"
                                     for x, y in pairs))
 
-    for n in [n for n in ("panel", "relay") if n in names]:
+    for n in [n for n in ("panel", "relay", "verbatim") if n in names]:
         us = systems[n]
         print(f"\n{n}: agents in initially correct panels — adopted in round 1 -> round 2 "
-              f"(agent 0{' = intake' if n == 'relay' else ''} | agents 1-2) ; all agents caved / recovered in round 2")
+              f"(agent 0{' = intake' if n != 'panel' else ''} | agents 1-2) ; all agents caved / recovered in round 2")
         for s, _, _ in SLOTS:
             ag = [x for c in us for u in us[c] if u["init"] for x in [u["agents"][s]]]
             r = lambda idx, rnd: f"{sum(a[i][rnd] for a in ag for i in idx) / max(len(ag) * len(idx), 1):4.0%}"
